@@ -1,0 +1,182 @@
+#lang marv
+
+import bucket from aws/s3
+import resource from marv/resources
+
+module main {
+
+    resources.init_state('mystate.dat')
+
+    ; this can only return a bucket spec, won't define a resource....
+
+    let b = bucket(name='my-bucket')
+    ->  [let b = bucket({name=...})]
+
+    let b2 = bucket(name='my2-bucket', tags={name=b.name})
+
+
+    ; := is used to define a resource; this allows function bucket to receive
+    ; extra context which is passed into the resource manager.
+    ; NB context idea changes in next example
+
+    c := bucket(name='my-bucketc')
+    ->  [ ctxassign "c" bucket({name='my-bucket'}) ]
+    ->  [ let c = bucket(ctx, {name='my-bucket'}) ]
+
+    ; where ctx is struct:
+    ;   varname = 'c'
+    ;   module_path = ['main']
+    ;   src_file = 'example1.mrv'
+    ;   src_line = 15
+
+
+    v := aws():vpc(...)
+    s := aws():subnet(...)
+
+    v := aws(vpc)(...)
+    ; set aws() prefix to all assignment requests
+    with aws() {
+        v := vpc()
+        s := subnet()
+    }
+
+    resources.plan()
+    resources.apply()
+}
+
+
+fn add_labels(obj) = obj <- { labels = obj.labels <- { org='myorg' } }
+fn labeler(ctx, typefn, obj) = typefn(ctx, add_labels(obj))
+
+module label_ex {
+
+    ; illustrating two different approaches to generic labelling
+    ; of resources
+
+    b := labeler(bucket, name='mybucket-b')
+    -> [ ctxassign "b" labeler(bucket, {name='..'}) ]
+    -> [ let b = labeler(ctx, bucket, {name...}) ]
+
+
+    fn ctx_add_labels(ctx, o) = values(ctx, add_labels(o))
+
+    let comp = ctx_add_labels | bucket
+    -> [ comp = (compose bucket ctx_add_labels) ]
+
+
+    c := ctx_add_labels | bucket (name='mybucket=c')
+    -> [ c := (compose bucket ctx_add_labels) .... ]
+    -> [ ctxassign 'c' (compose ...)(name=...) ]
+    -> [ let c = (compose ...)(ctx, {name=...} ]
+
+
+    ; Threading ctx everywhere, screams 'readerMonad'....
+    ; functionally speaking, bucket could return a function that requires
+    ; context to execute:
+
+    let b = bucket(...)
+    [ b = fn(ctx) ; bucket() returns fn(ctx).... ]
+
+    ; then composing:
+    let c = add_labels | bucket (...)
+    -> [ c = (compose1 bucket add_labels) ... ]
+    -> [ c = fn(ctx) ]
+
+    ; binding
+    c1 := c
+    -> [ ctxassign 'c1' c(ctx) ]
+    -> [ let c1 = c(ctx) ]   ; in this case the ctx is bound to this 
+                             ; exact source location
+
+    ; can we do better, syntax wise?
+    let lb = add_labels | bucket
+    -> [ lb = (compose1 bucket add_labels) ] ; lb=fn(ctx)
+
+    ; binding
+    mybucket := lb(name...)
+    -> [ ctxassign "mybucket" lb(name...) ]
+
+    ; NB change of context idea; in racket experiments I see that
+    ; ctxassign calls lb(name...) to get the ctx function which
+    ; is then called itself.
+
+}
+
+module loop_ex {
+
+    ; Context needs to change in module entry/exit and in loops
+    ; ctx = [ loop_ex ]
+
+    subnets = ["eu-1", "eu-2", "eu-3"].map(subnet)
+
+    ; or
+
+    ; user is manually constructing the structure; a list with
+    ; hash elements in it. Other iterators might include a
+    ; for/hash iteration over a list of keys
+
+    bs_list = for/list zone in ["eu-1", "eu-2", "eu-3"] {
+
+        ; ctx should equal module.loop_ex.bs_list[zone]
+        ; achieved with 'parameterize' around globalctx (see with-context below)
+
+        ; ctx = [ $zone, bucket_and_subnet, loop_ex ]
+
+        b := bucket(name + zone...)
+        s := subnet(zone...)
+
+        ; NB each loop returns an element to go into the list,
+        ; in this case a hash of the two resources
+        { b = b, s = s }
+
+        ; i.e. there's no magic here, the resources can only
+        ; be accessed by code if they are passed out of the
+        ; loop
+
+        ; NB may consider adding a 'resource-lookup' function
+        ; to recover a resource by it's ID?
+    }
+
+    # The code would look like this:
+    # (define bs
+    #   (statectx-change
+    #    #f "bs"
+    #    (for/list ([zone (map symbol->string '(eu1 eu2 eu3))])
+    #      (statectx-change
+    #       #f zone
+    #       (:= sn1 (:: aws (compose1 subnet add-labels add-vpc) (hash 'zone zone) ))
+    #       (:= sn2 (:: aws (compose1 subnet add-labels add-vpc) (hash 'zone zone) ))
+    #
+    #       ;(:== "_" (svar (list (hash-ref (sn1) 'snid) (hash-ref (sn2) 'snid))))
+    #       (lambda()(cons (hash-ref (sn1) 'snid) (hash-ref (sn2) 'snid)))
+    #       ;(list (hash-ref (sn1) 'snid) (hash-ref (sn2) 'snid))
+    #       ))))
+
+}
+
+module func_ex {
+    ; what about functions that define resources?
+
+    ; fine, but if multiple calls then must use 'with-context', 
+    ; otherwise from a resource perspective they would redefine 
+    ; a resource. Generally this is a 'parameterize' call.
+
+    fn myfunc(n) = {
+        with-context(n, { 
+            ; ctx = [ $n, myfunc, loop_ex ]
+            b := bucket(name=n)
+            -> [
+        })
+
+        ; btw if called from another module, eg. module 'kev':
+        ;   ctx = [$n, myfunc, loop_ex, kev]
+    }
+    myfunc("mybucket")
+
+    ; NB we may consider allowing a with-global-context to
+    ; completely override the current context, to be used
+    ; carefully!
+
+}
+
+

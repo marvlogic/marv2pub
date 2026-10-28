@@ -1,0 +1,13 @@
+*.zo
+*.dep
+*.bak
+*.dat
+*.log
+*.tgz
+compiled/
+tmp/
+
+# AWS credentials and configuration
+.aws/
+credentials
+config
